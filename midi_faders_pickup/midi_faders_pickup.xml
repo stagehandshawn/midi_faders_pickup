@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<GMA3 DataVersion="2.3.2.0">
+    <UserPlugin Name="Midi Faders Pickup" Author="ShawnR" Version="0.2.0" Path="/midi_faders_pickup">
+        <ComponentLua Name="Main" Filename="main.lua"/>
+    </UserPlugin>
+</GMA3>
