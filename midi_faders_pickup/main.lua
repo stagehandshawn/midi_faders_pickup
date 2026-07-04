@@ -1,25 +1,27 @@
 -- MA3 MIDI Pickup by Shawn R
--- Polls dummy input executors 231-24 assigned to seq 9990-9999 and forwards them to target executors 201-210
+-- Polls a fixed bank of source executors assigned to pickup sequences
+-- and forwards them to a target executor range with pickup behavior.
 -- only after the dummy control crosses the current target value.
 
 -- How to use
--- On startup the plugin can create pickup sequences 9990-9999,
--- assign them to executors 231-240 on page 9999,
+-- On startup the plugin can create the configured pickup sequences,
+-- assign them to the configured source executors on the fixed source page,
 -- and create matching MIDI remotes if they are missing.
 -- You will need to update the Midi CC notes in of the midi remotes to match your midi controller
 
 local loop
 
 -- Tuneables
+local LaneCount = 10 -- Number of faders to track
+
+local PollRateSeconds = 0.1 -- Polling rate in seconds for checking source and target executor values
+
 local ScriptVersion = "0.2.0"
-local PollRateSeconds = 0.1
 local PickupTolerance = 1.0
 local ExternalDirtyThreshold = 1
 local SourceExecStart = 231
 local TargetExecStart = 201
-local LaneCount = 10
 local PickupSourcePage = 9999
-local PickupSequenceStart = 9990
 local PickupSequenceEnd = 9999
 local PickupRemoteNamePrefix = "midi_faders_pickup_"
 local PickupMidiChannel = 1
@@ -35,6 +37,18 @@ local function DebugPrint(...)
     if debugMode then
         Printf(...)
     end
+end
+
+local function sourceExecEnd()
+    return SourceExecStart + LaneCount - 1
+end
+
+local function targetExecEnd()
+    return TargetExecStart + LaneCount - 1
+end
+
+local function pickupSequenceStart()
+    return PickupSequenceEnd - LaneCount + 1
 end
 
 local function clamp(value, low, high)
@@ -201,6 +215,48 @@ local function setRemoteProperty(remote, propName, value, isString)
     return runCmd('Set ' .. addr .. ' Property "' .. propName .. '" ' .. encoded)
 end
 
+local function pickupSequenceRangeText()
+    return string.format("%d-%d", pickupSequenceStart(), PickupSequenceEnd)
+end
+
+local function sourceExecRangeText()
+    return string.format("%d-%d", SourceExecStart, sourceExecEnd())
+end
+
+local function targetExecRangeText()
+    return string.format("%d-%d", TargetExecStart, targetExecEnd())
+end
+
+local function validateConfiguration()
+    if LaneCount < 1 then
+        return false, "LaneCount must be at least 1."
+    end
+
+    if LaneCount > 15 then
+        return false, string.format("LaneCount %d is too large. grandMA3 only shows up to 15 faders on screen for this setup.", LaneCount)
+    end
+
+    if pickupSequenceStart() < 1 then
+        return false, string.format("LaneCount %d is too large for ending sequence %d. Computed start would be %d.",
+                                    LaneCount,
+                                    PickupSequenceEnd,
+                                    pickupSequenceStart())
+    end
+
+    return true, nil
+end
+
+local function showConfigurationError(message)
+    MessageBox({
+        title = "MA3 MIDI Pickup",
+        message = message,
+        display = getFocusDisplayIndex(),
+        commands = {
+            {value = 1, name = "OK"},
+        },
+    })
+end
+
 local function createPickupSourcePage()
     if not pageExists(PickupSourcePage) then
         runCmd(string.format("Store Page %d /nc", PickupSourcePage))
@@ -209,7 +265,7 @@ end
 
 local function createMissingPickupSequences()
     for laneIndex = 1, LaneCount do
-        local seqNo = PickupSequenceStart + laneIndex - 1
+        local seqNo = pickupSequenceStart() + laneIndex - 1
         if not sequenceExists(seqNo) then
             runCmd(string.format("Store Sequence %d /nc", seqNo))
         end
@@ -240,7 +296,7 @@ local function getPickupSetupReport()
     }
 
     for laneIndex = 1, LaneCount do
-        local seqNo = PickupSequenceStart + laneIndex - 1
+        local seqNo = pickupSequenceStart() + laneIndex - 1
         local execNo = SourceExecStart + laneIndex - 1
         local remoteName = PickupRemoteNamePrefix .. tostring(laneIndex)
         local sequenceObject = getSequenceObject(seqNo)
@@ -319,7 +375,12 @@ local function buildPickupSetupWarningMessage(report)
     end
 
     table.insert(lines, "")
-    table.insert(lines, "Do you want to create missing items and replace wrong Page 9999 executor assignments?")
+    table.insert(
+        lines,
+        string.format("Do you want to create missing items and replace wrong Page %d executor assignments for source executors %s?",
+                      PickupSourcePage,
+                      sourceExecRangeText())
+    )
     return table.concat(lines, "\n")
 end
 
@@ -405,7 +466,8 @@ end
 local function showPickupSetupReminder()
     MessageBox({
         title = "MA3 MIDI Pickup",
-        message = "Make sure to assign the correct Midi CCs to the created midi remotes",
+        message = string.format("Make sure to assign the correct Midi CCs to the created midi remotes for source executors %s",
+                                sourceExecRangeText()),
         display = getFocusDisplayIndex(),
         commands = {
             {value = 1, name = "OK"},
@@ -674,9 +736,10 @@ local function printStartupSummary()
     Printf("Source page %d executors %d-%d -> current page executors %d-%d",
            PickupSourcePage,
            SourceExecStart,
-           SourceExecStart + LaneCount - 1,
+           sourceExecEnd(),
            TargetExecStart,
-           TargetExecStart + LaneCount - 1)
+           targetExecEnd())
+    Printf("Pickup sequence range: %s", pickupSequenceRangeText())
     Printf("Pickup tolerance: %s", string.format("%.2f", PickupTolerance))
     Printf("External dirty threshold: %s", string.format("%.2f", ExternalDirtyThreshold))
 end
@@ -692,6 +755,12 @@ function main()
     if running then
         running = false
         Printf("Stopping -- MA3 MIDI Pickup v%s", ScriptVersion)
+        return
+    end
+
+    local configOk, configError = validateConfiguration()
+    if not configOk then
+        showConfigurationError(configError)
         return
     end
 
