@@ -36,3 +36,9 @@ The remotes point at the fixed source on page `9999`. After they are created, Yo
 - `LaneCount` should stay between `1` and `15` default is `10`
 - Existing sequences are left alone if they already exist
 - The plugin will remap the existing pickup remotes back to the fixed source executors each time it starts
+
+## Contact
+ - stagehandshawn@gmail.com
+
+## Donations - if Iv'e made your live a little easier
+ - Cashapp: $stagehandshawn
