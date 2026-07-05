@@ -2,9 +2,14 @@
 -- Polls a fixed bank of source executors assigned to pickup sequences
 -- and forwards them to a target executor range with pickup behavior.
 -- only after the dummy control crosses the current target value.
-
+--
+-- v0.3.0 change: the target fader is no longer moved by Lua.
+-- Every lane now has two MIDI remotes listening to the same physical
+-- fader's MIDI CC:
+--   1. Changed from Lua controlling fader to midi input. Using a new gate remote to compare and block midi till both pickup and gate are the same.
+--
 -- How to use
--- On startup the plugin can create the configured pickup sequences,
+-- On startup the plugin can create the configured pickup sequences for pickup and gate midi remotes,
 -- assign them to the configured source executors on the fixed source page,
 -- and create matching MIDI remotes if they are missing.
 -- You will need to update the Midi CC notes in of the midi remotes to match your midi controller
@@ -17,7 +22,7 @@ local MaxLaneCount = 15
 
 local PollRateSeconds = 0.1 -- Polling rate in seconds for checking source and target executor values
 
-local ScriptVersion = "0.2.0"
+local ScriptVersion = "0.3.0"
 local PickupTolerance = 1.0
 local ExternalDirtyThreshold = 1
 local SourceExecStart = 231
@@ -25,6 +30,7 @@ local TargetExecStart = 201
 local PickupSourcePage = 9999
 local PickupSequenceEnd = 9999
 local PickupRemoteNamePrefix = "midi_faders_pickup_"
+local PickupGateRemoteNamePrefix = "midi_faders_gate_"
 local PickupMidiChannel = 1
 local PickupMidiCcStart = 1
 
@@ -56,37 +62,13 @@ local function pickupSequenceFloor()
     return PickupSequenceEnd - MaxLaneCount + 1
 end
 
-local function clamp(value, low, high)
-    if value < low then
-        return low
-    end
-    if value > high then
-        return high
-    end
-    return value
-end
-
 local function clearLaneState(lane)
     lane.latched = false
     lane.lastSourceValue = nil
     lane.lastTargetValue = nil
-    lane.lastForwardedValue = nil
     lane.targetSignature = nil
     lane.lastPage = nil
     lane.lastDebugState = nil
-end
-
-local function initializeLanes()
-    lanes = {}
-    for laneIndex = 1, LaneCount do
-        local lane = {
-            laneIndex = laneIndex,
-            sourceExec = SourceExecStart + laneIndex - 1,
-            targetExec = TargetExecStart + laneIndex - 1,
-        }
-        clearLaneState(lane)
-        lanes[laneIndex] = lane
-    end
 end
 
 local function safeObjectAddr(object)
@@ -281,6 +263,10 @@ local function pickupRemoteName(laneIndex)
     return PickupRemoteNamePrefix .. tostring(laneIndex)
 end
 
+local function pickupGateRemoteName(laneIndex)
+    return PickupGateRemoteNamePrefix .. tostring(laneIndex)
+end
+
 local function validateConfiguration()
     if LaneCount < 1 then
         return false, "LaneCount must be at least 1."
@@ -394,6 +380,8 @@ local function getPickupSetupReport()
         assignmentIssues = {},
         missingRemotes = {},
         staleRemotes = {},
+        missingGateRemotes = {},
+        staleGateRemotes = {},
         sequenceRebuildRequired = false,
     }
 
@@ -440,12 +428,22 @@ local function getPickupSetupReport()
         if not midiRemoteExists(remoteName) then
             table.insert(report.missingRemotes, remoteName)
         end
+
+        local gateRemoteName = pickupGateRemoteName(laneIndex)
+        if not midiRemoteExists(gateRemoteName) then
+            table.insert(report.missingGateRemotes, gateRemoteName)
+        end
     end
 
     for laneIndex = LaneCount + 1, MaxLaneCount do
         local remoteName = pickupRemoteName(laneIndex)
         if midiRemoteExists(remoteName) then
             table.insert(report.staleRemotes, remoteName)
+        end
+
+        local gateRemoteName = pickupGateRemoteName(laneIndex)
+        if midiRemoteExists(gateRemoteName) then
+            table.insert(report.staleGateRemotes, gateRemoteName)
         end
     end
 
@@ -469,7 +467,9 @@ local function pickupSetupNeedsAttention(report)
            #report.staleSequences > 0 or
            #report.assignmentIssues > 0 or
            #report.missingRemotes > 0 or
-           #report.staleRemotes > 0
+           #report.staleRemotes > 0 or
+           #report.missingGateRemotes > 0 or
+           #report.staleGateRemotes > 0
 end
 
 local function buildPickupSetupWarningMessage(report)
@@ -530,6 +530,14 @@ local function buildPickupSetupWarningMessage(report)
         table.insert(lines, string.format("- MIDI remote %s is outside the current lane count and will be removed", remoteName))
     end
 
+    for _, remoteName in ipairs(report.missingGateRemotes) do
+        table.insert(lines, string.format("- MIDI gate remote %s is missing", remoteName))
+    end
+
+    for _, remoteName in ipairs(report.staleGateRemotes) do
+        table.insert(lines, string.format("- MIDI gate remote %s is outside the current lane count and will be removed", remoteName))
+    end
+
     if report.sequenceRebuildRequired then
         table.insert(lines, "")
         table.insert(lines, string.format("- Pickup sequences in %s will be deleted, then %s will be recreated to match the current lane configuration",
@@ -567,6 +575,32 @@ local function repairAllPickupExecutorAssignments()
     end
 end
 
+local function createRemoteBoundToSource(midiPool, remoteName, laneIndex)
+    local remote = midiPool:Append()
+    if not remote then
+        return nil
+    end
+
+    local execNo = SourceExecStart + laneIndex - 1
+    local slot = getExecutorSlot(PickupSourcePage, execNo)
+
+    setRemoteProperty(remote, "Name", remoteName, true)
+    setRemoteProperty(remote, "MIDICHANNEL", PickupMidiChannel, false)
+    setRemoteProperty(remote, "MIDITYPE", 3, false)
+    setRemoteProperty(remote, "MIDIINDEX", PickupMidiCcStart + laneIndex - 1, false)
+    setRemoteProperty(remote, "KEY", "", true)
+    if slot and slot.Object then
+        remote.target = slot.Object
+    end
+    if slot and slot.fader then
+        remote.fader = slot.fader
+    else
+        setRemoteProperty(remote, "FADER", "Master", true)
+    end
+
+    return remote
+end
+
 local function createMissingPickupMidiRemotes(missingRemotes)
     local missingLookup = {}
     for _, remoteName in ipairs(missingRemotes) do
@@ -582,25 +616,33 @@ local function createMissingPickupMidiRemotes(missingRemotes)
     for laneIndex = 1, LaneCount do
         local remoteName = pickupRemoteName(laneIndex)
         if missingLookup[remoteName] then
-            local remote = midiPool:Append()
-            if remote then
-                local execNo = SourceExecStart + laneIndex - 1
-                local slot = getExecutorSlot(PickupSourcePage, execNo)
+            createRemoteBoundToSource(midiPool, remoteName, laneIndex)
+        end
+    end
+end
 
-                setRemoteProperty(remote, "Name", remoteName, true)
-                setRemoteProperty(remote, "MIDICHANNEL", PickupMidiChannel, false)
-                setRemoteProperty(remote, "MIDITYPE", 3, false)
-                setRemoteProperty(remote, "MIDIINDEX", PickupMidiCcStart + laneIndex - 1, false)
-                setRemoteProperty(remote, "KEY", "", true)
-                if slot and slot.Object then
-                    remote.target = slot.Object
-                end
-                if slot and slot.fader then
-                    remote.fader = slot.fader
-                else
-                    setRemoteProperty(remote, "FADER", "Master", true)
-                end
-            end
+local function createMissingPickupGateRemotes(missingGateRemotes)
+    local missingLookup = {}
+    for _, remoteName in ipairs(missingGateRemotes) do
+        missingLookup[remoteName] = true
+    end
+
+    local midiPool = getMidiRemotePool()
+    if not midiPool then
+        Printf("[Pickup] MIDI remote pool unavailable")
+        return
+    end
+
+    -- Gate remotes share the same MIDI channel/index as the matching shadow
+    -- remote above, but their target gets redirected by the poll loop:
+    -- pointed at the dummy source object (blocked / no-op) while a lane is
+    -- unlatched, and re-pointed at the real target executor once the lane
+    -- picks up, so the physical fader drives the target directly over MIDI
+    -- instead of via a Lua-issued fader command.
+    for laneIndex = 1, LaneCount do
+        local remoteName = pickupGateRemoteName(laneIndex)
+        if missingLookup[remoteName] then
+            createRemoteBoundToSource(midiPool, remoteName, laneIndex)
         end
     end
 end
@@ -614,10 +656,21 @@ local function deleteStalePickupMidiRemotes(staleRemotes)
     end
 end
 
+local function deleteStalePickupGateRemotes(staleGateRemotes)
+    for _, remoteName in ipairs(staleGateRemotes) do
+        local remote = findMidiRemoteByName(remoteName)
+        if remote then
+            deleteMidiRemote(remote)
+        end
+    end
+end
+
 local function remapPickupMidiRemotes()
     for laneIndex = 1, LaneCount do
         local remoteName = pickupRemoteName(laneIndex)
         local remote = findMidiRemoteByName(remoteName)
+        local gateRemoteName = pickupGateRemoteName(laneIndex)
+        local gateRemote = findMidiRemoteByName(gateRemoteName)
         local execNo = SourceExecStart + laneIndex - 1
         local slot = getExecutorSlot(PickupSourcePage, execNo)
 
@@ -627,6 +680,19 @@ local function remapPickupMidiRemotes()
             end
             if slot.fader and remote.fader ~= slot.fader then
                 remote.fader = slot.fader
+            end
+        end
+
+        -- Every lane starts unlatched, so the gate remote always starts
+        -- blocked (pointed at the dummy source object) here. The poll loop
+        -- is responsible for pointing it at the real target once a lane
+        -- picks up.
+        if gateRemote and slot and slot.Object then
+            if not sameObject(gateRemote.target, slot.Object) then
+                gateRemote.target = slot.Object
+            end
+            if slot.fader and gateRemote.fader ~= slot.fader then
+                gateRemote.fader = slot.fader
             end
         end
     end
@@ -683,16 +749,15 @@ local function ensurePickupSetup()
     if #report.missingRemotes > 0 then
         createMissingPickupMidiRemotes(report.missingRemotes)
     end
+    if #report.staleGateRemotes > 0 then
+        deleteStalePickupGateRemotes(report.staleGateRemotes)
+    end
+    if #report.missingGateRemotes > 0 then
+        createMissingPickupGateRemotes(report.missingGateRemotes)
+    end
 
     showPickupSetupReminder()
     return true
-end
-
-local function resetPickupState(reason)
-    for _, lane in ipairs(lanes) do
-        clearLaneState(lane)
-    end
-    DebugPrint("[Pickup] reset all lanes (%s)", reason or "manual")
 end
 
 local function getExecutorInfo(execId, pageOverride)
@@ -764,38 +829,95 @@ local function shouldLatchPickup(previousValue, currentValue, targetValue)
            (previousDelta > 0 and currentDelta < 0)
 end
 
-local function applyTargetFader(execInfo, value)
-    local clampedValue = clamp(value, 0, 100)
+local function getGateRemote(lane)
+    return findMidiRemoteByName(pickupGateRemoteName(lane.laneIndex))
+end
 
-    if execInfo.handle then
-        local ok = pcall(function()
-            execInfo.handle:SetFader{token = "FaderMaster", value = clampedValue, faderDisabled = false}
-        end)
-        if ok then
-            return true
-        end
+-- Points a lane's gate remote at a given object/fader. This is the only
+-- thing that ever changes which executor the physical MIDI fader drives:
+-- no Lua code ever calls SetFader or Cmd on the target executor. When the
+-- gate remote's target is the dummy source object, the physical fader is
+-- effectively blocked from the real target (it just keeps moving the dummy
+-- it was already moving anyway). When the gate remote's target is the real
+-- target executor, MIDI drives it directly.
+local function pointGateRemoteAt(lane, object, faderRef)
+    local remote = getGateRemote(lane)
+    if not remote or not object then
+        return false
     end
 
-    local page = execInfo.page or currentPage or CurrentExecPage().no
-    local command = string.format("FaderMaster Page %d.%d At %.3f", page, execInfo.id, clampedValue)
     local ok = pcall(function()
-        Cmd(command)
+        if not sameObject(remote.target, object) then
+            remote.target = object
+        end
+        if faderRef then
+            if remote.fader ~= faderRef then
+                remote.fader = faderRef
+            end
+        else
+            setRemoteProperty(remote, "FADER", "Master", true)
+        end
     end)
 
     if not ok then
-        Printf("[Pickup] failed to drive target exec %d", execInfo.id)
-        return false
+        Printf("[Pickup] Lane %d failed to repoint gate remote", lane.laneIndex)
     end
 
-    return true
+    return ok
 end
 
-local function shouldDirtyPickup(lane, targetValue)
-    if not lane.latched or lane.lastForwardedValue == nil then
+local function blockGateRemote(lane, sourceInfo)
+    if not sourceInfo or not sourceInfo.object then
+        return false
+    end
+    return pointGateRemoteAt(lane, sourceInfo.object, sourceInfo.faderRef)
+end
+
+local function unblockGateRemote(lane, targetInfo)
+    if not targetInfo or not targetInfo.object then
+        return false
+    end
+    return pointGateRemoteAt(lane, targetInfo.object, targetInfo.faderRef)
+end
+
+local function shouldDirtyPickup(lane, sourceValue, targetValue)
+    if not lane.latched then
         return false
     end
 
-    return math.abs(targetValue - lane.lastForwardedValue) > ExternalDirtyThreshold
+    -- While latched the gate remote drives the target directly from the
+    -- same MIDI CC the source/dummy executor tracks, so the two should stay
+    -- in lockstep. If they drift apart it means something other than the
+    -- picked-up fader moved the target (on-screen drag, another remote,
+    -- an effect, etc.), so the lane should drop back into pickup mode.
+    return math.abs(targetValue - sourceValue) > ExternalDirtyThreshold
+end
+
+local function initializeLanes()
+    lanes = {}
+    for laneIndex = 1, LaneCount do
+        local lane = {
+            laneIndex = laneIndex,
+            sourceExec = SourceExecStart + laneIndex - 1,
+            targetExec = TargetExecStart + laneIndex - 1,
+        }
+        clearLaneState(lane)
+        lanes[laneIndex] = lane
+    end
+
+    for _, lane in ipairs(lanes) do
+        local sourceInfo = getExecutorInfo(lane.sourceExec, PickupSourcePage)
+        blockGateRemote(lane, sourceInfo)
+    end
+end
+
+local function resetPickupState(reason)
+    for _, lane in ipairs(lanes) do
+        clearLaneState(lane)
+        local sourceInfo = getExecutorInfo(lane.sourceExec, PickupSourcePage)
+        blockGateRemote(lane, sourceInfo)
+    end
+    DebugPrint("[Pickup] reset all lanes (%s)", reason or "manual")
 end
 
 local function describeLane(lane)
@@ -822,10 +944,10 @@ local function serviceLane(lane, page)
 
     if lane.lastPage ~= page or lane.targetSignature ~= targetSignature then
         lane.latched = false
-        lane.lastForwardedValue = nil
         lane.targetSignature = targetSignature
         lane.lastPage = page
         lane.lastDebugState = nil
+        blockGateRemote(lane, sourceInfo)
         DebugPrint("[Pickup] %s relatched for page/assignment change", describeLane(lane))
     end
 
@@ -844,27 +966,30 @@ local function serviceLane(lane, page)
             "[Pickup] %s target executor has no assigned object" or
             "[Pickup] %s missing target executor handle"
         updateLaneDebugState(lane, stateKey, message, describeLane(lane))
+        if lane.latched then
+            blockGateRemote(lane, sourceInfo)
+        end
         lane.latched = false
         lane.lastSourceValue = sourceValue
         lane.lastTargetValue = targetValue
         return
     end
 
-    if shouldDirtyPickup(lane, targetValue) then
-        DebugPrint("[Pickup] %s dirtied by external target move (last %.2f, now %.2f)",
+    if shouldDirtyPickup(lane, sourceValue, targetValue) then
+        DebugPrint("[Pickup] %s dirtied by external target move (src %.2f, tgt %.2f)",
                    describeLane(lane),
-                   lane.lastForwardedValue,
+                   sourceValue,
                    targetValue)
         lane.latched = false
-        lane.lastForwardedValue = nil
         lane.lastDebugState = nil
+        blockGateRemote(lane, sourceInfo)
     end
 
     if not lane.latched and shouldLatchPickup(lane.lastSourceValue, sourceValue, targetValue) then
         lane.latched = true
-        lane.lastForwardedValue = nil
         lane.lastDebugState = "latched"
-        DebugPrint("[Pickup] %s latched at src %.2f / tgt %.2f",
+        unblockGateRemote(lane, targetInfo)
+        DebugPrint("[Pickup] %s latched at src %.2f / tgt %.2f -- gate remote now driving target directly",
                    describeLane(lane),
                    sourceValue,
                    targetValue)
@@ -884,14 +1009,6 @@ local function serviceLane(lane, page)
                              sourceValue,
                              relation,
                              targetValue)
-    end
-
-    if lane.latched then
-        local shouldForward = lane.lastForwardedValue == nil or
-                              math.abs(sourceValue - lane.lastForwardedValue) > 0.01
-        if shouldForward and applyTargetFader(targetInfo, sourceValue) then
-            lane.lastForwardedValue = sourceValue
-        end
     end
 
     lane.lastSourceValue = sourceValue
