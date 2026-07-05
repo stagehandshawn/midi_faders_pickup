@@ -13,6 +13,7 @@ local loop
 
 -- Tuneables
 local LaneCount = 10 -- Number of faders to track
+local MaxLaneCount = 15
 
 local PollRateSeconds = 0.1 -- Polling rate in seconds for checking source and target executor values
 
@@ -49,6 +50,10 @@ end
 
 local function pickupSequenceStart()
     return PickupSequenceEnd - LaneCount + 1
+end
+
+local function pickupSequenceFloor()
+    return PickupSequenceEnd - MaxLaneCount + 1
 end
 
 local function clamp(value, low, high)
@@ -219,6 +224,10 @@ local function pickupSequenceRangeText()
     return string.format("%d-%d", pickupSequenceStart(), PickupSequenceEnd)
 end
 
+local function pickupSequenceManagedRangeText()
+    return string.format("%d-%d", pickupSequenceFloor(), PickupSequenceEnd)
+end
+
 local function sourceExecRangeText()
     return string.format("%d-%d", SourceExecStart, sourceExecEnd())
 end
@@ -236,8 +245,8 @@ local function validateConfiguration()
         return false, "LaneCount must be at least 1."
     end
 
-    if LaneCount > 15 then
-        return false, string.format("LaneCount %d is too large. grandMA3 only shows up to 15 faders on screen for this setup.", LaneCount)
+    if LaneCount > MaxLaneCount then
+        return false, string.format("LaneCount %d is too large. grandMA3 only shows up to %d faders on screen for this setup.", LaneCount, MaxLaneCount)
     end
 
     if pickupSequenceStart() < 1 then
@@ -306,8 +315,7 @@ local function createMissingPickupSequences()
 end
 
 local function rebuildPickupSequences()
-    for laneIndex = 1, LaneCount do
-        local seqNo = pickupSequenceStart() + laneIndex - 1
+    for seqNo = pickupSequenceFloor(), PickupSequenceEnd do
         if sequenceExists(seqNo) then
             runCmd(string.format("Delete Sequence %d /nc", seqNo))
         end
@@ -341,6 +349,7 @@ local function getPickupSetupReport()
         missingPage = not pageExists(PickupSourcePage),
         missingSequences = {},
         misconfiguredSequences = {},
+        staleSequences = {},
         assignmentIssues = {},
         missingRemotes = {},
         sequenceRebuildRequired = false,
@@ -391,7 +400,15 @@ local function getPickupSetupReport()
         end
     end
 
-    report.sequenceRebuildRequired = #report.missingSequences > 0 or #report.misconfiguredSequences > 0
+    for seqNo = pickupSequenceFloor(), pickupSequenceStart() - 1 do
+        if sequenceExists(seqNo) then
+            table.insert(report.staleSequences, seqNo)
+        end
+    end
+
+    report.sequenceRebuildRequired = #report.missingSequences > 0 or
+                                     #report.misconfiguredSequences > 0 or
+                                     #report.staleSequences > 0
 
     return report
 end
@@ -400,6 +417,7 @@ local function pickupSetupNeedsAttention(report)
     return report.missingPage or
            #report.missingSequences > 0 or
            #report.misconfiguredSequences > 0 or
+           #report.staleSequences > 0 or
            #report.assignmentIssues > 0 or
            #report.missingRemotes > 0
 end
@@ -429,6 +447,10 @@ local function buildPickupSetupWarningMessage(report)
         end
     end
 
+    for _, seqNo in ipairs(report.staleSequences) do
+        table.insert(lines, string.format("- Sequence %d is outside the current lane count and will be removed", seqNo))
+    end
+
     for _, issue in ipairs(report.assignmentIssues) do
         if issue.kind == "missing" then
             table.insert(
@@ -456,7 +478,8 @@ local function buildPickupSetupWarningMessage(report)
 
     if report.sequenceRebuildRequired then
         table.insert(lines, "")
-        table.insert(lines, string.format("- Sequences %s will be deleted and recreated to match the current lane configuration",
+        table.insert(lines, string.format("- Pickup sequences in %s will be deleted, then %s will be recreated to match the current lane configuration",
+                                          pickupSequenceManagedRangeText(),
                                           pickupSequenceRangeText()))
     end
 
