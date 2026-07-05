@@ -272,6 +272,28 @@ local function configureNewPickupSequence(seqNo, targetExecNo)
     runCmd(string.format('Set Sequence %d Property "AUTOSTART" "No"', seqNo))
 end
 
+local function getObjectProperty(object, propName)
+    if object == nil then
+        return nil
+    end
+
+    local ok, value = pcall(function()
+        return object[propName]
+    end)
+    if ok then
+        return value
+    end
+
+    return nil
+end
+
+local function normalizePropertyString(value)
+    local text = tostring(value or "")
+    text = text:gsub('^%s*"', ""):gsub('"%s*$', "")
+    text = text:gsub("^%s+", ""):gsub("%s+$", "")
+    return text
+end
+
 local function createMissingPickupSequences()
     for laneIndex = 1, LaneCount do
         local seqNo = pickupSequenceStart() + laneIndex - 1
@@ -280,6 +302,22 @@ local function createMissingPickupSequences()
             runCmd(string.format("Store Sequence %d /nc", seqNo))
             configureNewPickupSequence(seqNo, targetExecNo)
         end
+    end
+end
+
+local function rebuildPickupSequences()
+    for laneIndex = 1, LaneCount do
+        local seqNo = pickupSequenceStart() + laneIndex - 1
+        if sequenceExists(seqNo) then
+            runCmd(string.format("Delete Sequence %d /nc", seqNo))
+        end
+    end
+
+    for laneIndex = 1, LaneCount do
+        local seqNo = pickupSequenceStart() + laneIndex - 1
+        local targetExecNo = TargetExecStart + laneIndex - 1
+        runCmd(string.format("Store Sequence %d /nc", seqNo))
+        configureNewPickupSequence(seqNo, targetExecNo)
     end
 end
 
@@ -302,12 +340,15 @@ local function getPickupSetupReport()
     local report = {
         missingPage = not pageExists(PickupSourcePage),
         missingSequences = {},
+        misconfiguredSequences = {},
         assignmentIssues = {},
         missingRemotes = {},
+        sequenceRebuildRequired = false,
     }
 
     for laneIndex = 1, LaneCount do
         local seqNo = pickupSequenceStart() + laneIndex - 1
+        local targetExecNo = TargetExecStart + laneIndex - 1
         local execNo = SourceExecStart + laneIndex - 1
         local remoteName = PickupRemoteNamePrefix .. tostring(laneIndex)
         local sequenceObject = getSequenceObject(seqNo)
@@ -315,6 +356,19 @@ local function getPickupSetupReport()
 
         if not sequenceObject then
             table.insert(report.missingSequences, seqNo)
+        else
+            local expectedName = pickupSequenceName(targetExecNo)
+            local currentName = normalizePropertyString(getObjectProperty(sequenceObject, "NAME"))
+            local normalizedExpectedName = normalizePropertyString(expectedName)
+
+            if currentName ~= normalizedExpectedName then
+                table.insert(report.misconfiguredSequences, {
+                    seqNo = seqNo,
+                    currentName = currentName,
+                    expectedName = normalizedExpectedName,
+                    nameWrong = currentName ~= normalizedExpectedName,
+                })
+            end
         end
 
         if slot == nil or slot.Object == nil then
@@ -323,7 +377,7 @@ local function getPickupSetupReport()
                 seqNo = seqNo,
                 kind = "missing",
             })
-        elseif sequenceObject ~= nil and not sameObject(slot.Object, sequenceObject) then
+        elseif sequenceObject == nil or not sameObject(slot.Object, sequenceObject) then
             table.insert(report.assignmentIssues, {
                 execNo = execNo,
                 seqNo = seqNo,
@@ -337,12 +391,15 @@ local function getPickupSetupReport()
         end
     end
 
+    report.sequenceRebuildRequired = #report.missingSequences > 0 or #report.misconfiguredSequences > 0
+
     return report
 end
 
 local function pickupSetupNeedsAttention(report)
     return report.missingPage or
            #report.missingSequences > 0 or
+           #report.misconfiguredSequences > 0 or
            #report.assignmentIssues > 0 or
            #report.missingRemotes > 0
 end
@@ -358,6 +415,18 @@ local function buildPickupSetupWarningMessage(report)
 
     for _, seqNo in ipairs(report.missingSequences) do
         table.insert(lines, string.format("- Sequence %d is missing", seqNo))
+    end
+
+    for _, issue in ipairs(report.misconfiguredSequences) do
+        if issue.nameWrong then
+            table.insert(
+                lines,
+                string.format('- Sequence %d name is "%s"; expected "%s"',
+                              issue.seqNo,
+                              issue.currentName,
+                              issue.expectedName)
+            )
+        end
     end
 
     for _, issue in ipairs(report.assignmentIssues) do
@@ -383,6 +452,12 @@ local function buildPickupSetupWarningMessage(report)
 
     for _, remoteName in ipairs(report.missingRemotes) do
         table.insert(lines, string.format("- MIDI remote %s is missing", remoteName))
+    end
+
+    if report.sequenceRebuildRequired then
+        table.insert(lines, "")
+        table.insert(lines, string.format("- Sequences %s will be deleted and recreated to match the current lane configuration",
+                                          pickupSequenceRangeText()))
     end
 
     table.insert(lines, "")
@@ -499,8 +574,8 @@ local function ensurePickupSetup()
     if report.missingPage then
         createPickupSourcePage()
     end
-    if #report.missingSequences > 0 then
-        createMissingPickupSequences()
+    if report.sequenceRebuildRequired then
+        rebuildPickupSequences()
     end
     if #report.assignmentIssues > 0 then
         repairPickupExecutorAssignments(report.assignmentIssues)
