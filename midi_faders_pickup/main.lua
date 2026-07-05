@@ -263,11 +263,16 @@ local function createPickupSourcePage()
     end
 end
 
+local function configureNewPickupSequence(seqNo)
+    runCmd(string.format('Set Sequence %d Property "AUTOSTART" "No"', seqNo))
+end
+
 local function createMissingPickupSequences()
     for laneIndex = 1, LaneCount do
         local seqNo = pickupSequenceStart() + laneIndex - 1
         if not sequenceExists(seqNo) then
             runCmd(string.format("Store Sequence %d /nc", seqNo))
+            configureNewPickupSequence(seqNo)
         end
     end
 end
