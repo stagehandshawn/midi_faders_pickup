@@ -227,6 +227,10 @@ local function targetExecRangeText()
     return string.format("%d-%d", TargetExecStart, targetExecEnd())
 end
 
+local function pickupSequenceName(targetExecNo)
+    return string.format("Midi Pickup to %d", targetExecNo)
+end
+
 local function validateConfiguration()
     if LaneCount < 1 then
         return false, "LaneCount must be at least 1."
@@ -263,16 +267,18 @@ local function createPickupSourcePage()
     end
 end
 
-local function configureNewPickupSequence(seqNo)
+local function configureNewPickupSequence(seqNo, targetExecNo)
+    runCmd(string.format('Set Sequence %d Property "NAME" "%s"', seqNo, pickupSequenceName(targetExecNo)))
     runCmd(string.format('Set Sequence %d Property "AUTOSTART" "No"', seqNo))
 end
 
 local function createMissingPickupSequences()
     for laneIndex = 1, LaneCount do
         local seqNo = pickupSequenceStart() + laneIndex - 1
+        local targetExecNo = TargetExecStart + laneIndex - 1
         if not sequenceExists(seqNo) then
             runCmd(string.format("Store Sequence %d /nc", seqNo))
-            configureNewPickupSequence(seqNo)
+            configureNewPickupSequence(seqNo, targetExecNo)
         end
     end
 end
