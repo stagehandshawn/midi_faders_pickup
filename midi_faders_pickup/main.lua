@@ -195,6 +195,43 @@ local function midiRemoteExists(name)
     return findMidiRemoteByName(name) ~= nil
 end
 
+local function deleteMidiRemote(remote)
+    if remote == nil then
+        return false
+    end
+
+    local ok, err = pcall(function()
+        local parent = remote:Parent()
+        if not parent then
+            error("missing parent")
+        end
+
+        local childPosition = nil
+        for position, child in ipairs(parent:Children()) do
+            if child == remote or (child and remote.index ~= nil and child.index == remote.index) then
+                childPosition = position
+                break
+            end
+        end
+
+        if childPosition == nil then
+            error("could not locate MIDI remote in parent pool")
+        end
+
+        parent:Remove(childPosition)
+    end)
+
+    if not ok then
+        Printf("[Pickup] failed to delete MIDI remote %s", tostring(remote.name or "unknown"))
+        if err then
+            Printf("[Pickup] %s", tostring(err))
+        end
+        return false
+    end
+
+    return true
+end
+
 local function runCmd(command)
     DebugPrint("[Pickup] cmd: %s", command)
     local ok, err = pcall(function()
@@ -238,6 +275,10 @@ end
 
 local function pickupSequenceName(targetExecNo)
     return string.format("Midi Pickup to %d", targetExecNo)
+end
+
+local function pickupRemoteName(laneIndex)
+    return PickupRemoteNamePrefix .. tostring(laneIndex)
 end
 
 local function validateConfiguration()
@@ -352,6 +393,7 @@ local function getPickupSetupReport()
         staleSequences = {},
         assignmentIssues = {},
         missingRemotes = {},
+        staleRemotes = {},
         sequenceRebuildRequired = false,
     }
 
@@ -359,7 +401,7 @@ local function getPickupSetupReport()
         local seqNo = pickupSequenceStart() + laneIndex - 1
         local targetExecNo = TargetExecStart + laneIndex - 1
         local execNo = SourceExecStart + laneIndex - 1
-        local remoteName = PickupRemoteNamePrefix .. tostring(laneIndex)
+        local remoteName = pickupRemoteName(laneIndex)
         local sequenceObject = getSequenceObject(seqNo)
         local slot = getExecutorSlot(PickupSourcePage, execNo)
 
@@ -400,6 +442,13 @@ local function getPickupSetupReport()
         end
     end
 
+    for laneIndex = LaneCount + 1, MaxLaneCount do
+        local remoteName = pickupRemoteName(laneIndex)
+        if midiRemoteExists(remoteName) then
+            table.insert(report.staleRemotes, remoteName)
+        end
+    end
+
     for seqNo = pickupSequenceFloor(), pickupSequenceStart() - 1 do
         if sequenceExists(seqNo) then
             table.insert(report.staleSequences, seqNo)
@@ -419,7 +468,8 @@ local function pickupSetupNeedsAttention(report)
            #report.misconfiguredSequences > 0 or
            #report.staleSequences > 0 or
            #report.assignmentIssues > 0 or
-           #report.missingRemotes > 0
+           #report.missingRemotes > 0 or
+           #report.staleRemotes > 0
 end
 
 local function buildPickupSetupWarningMessage(report)
@@ -476,6 +526,10 @@ local function buildPickupSetupWarningMessage(report)
         table.insert(lines, string.format("- MIDI remote %s is missing", remoteName))
     end
 
+    for _, remoteName in ipairs(report.staleRemotes) do
+        table.insert(lines, string.format("- MIDI remote %s is outside the current lane count and will be removed", remoteName))
+    end
+
     if report.sequenceRebuildRequired then
         table.insert(lines, "")
         table.insert(lines, string.format("- Pickup sequences in %s will be deleted, then %s will be recreated to match the current lane configuration",
@@ -515,7 +569,7 @@ local function createMissingPickupMidiRemotes(missingRemotes)
     end
 
     for laneIndex = 1, LaneCount do
-        local remoteName = PickupRemoteNamePrefix .. tostring(laneIndex)
+        local remoteName = pickupRemoteName(laneIndex)
         if missingLookup[remoteName] then
             local remote = midiPool:Append()
             if remote then
@@ -540,9 +594,18 @@ local function createMissingPickupMidiRemotes(missingRemotes)
     end
 end
 
+local function deleteStalePickupMidiRemotes(staleRemotes)
+    for _, remoteName in ipairs(staleRemotes) do
+        local remote = findMidiRemoteByName(remoteName)
+        if remote then
+            deleteMidiRemote(remote)
+        end
+    end
+end
+
 local function remapPickupMidiRemotes()
     for laneIndex = 1, LaneCount do
-        local remoteName = PickupRemoteNamePrefix .. tostring(laneIndex)
+        local remoteName = pickupRemoteName(laneIndex)
         local remote = findMidiRemoteByName(remoteName)
         local execNo = SourceExecStart + laneIndex - 1
         local slot = getExecutorSlot(PickupSourcePage, execNo)
@@ -560,7 +623,7 @@ end
 
 local function promptRepairPickupSetup(report)
     local result = MessageBox({
-        title = "MA3 MIDI Pickup",
+        title = "Create Missing or Incorrect Items?",
         message = buildPickupSetupWarningMessage(report),
         display = getFocusDisplayIndex(),
         commands = {
@@ -602,6 +665,9 @@ local function ensurePickupSetup()
     end
     if #report.assignmentIssues > 0 then
         repairPickupExecutorAssignments(report.assignmentIssues)
+    end
+    if #report.staleRemotes > 0 then
+        deleteStalePickupMidiRemotes(report.staleRemotes)
     end
     if #report.missingRemotes > 0 then
         createMissingPickupMidiRemotes(report.missingRemotes)
