@@ -556,6 +556,17 @@ local function repairPickupExecutorAssignments(assignmentIssues)
     end
 end
 
+local function repairAllPickupExecutorAssignments()
+    for laneIndex = 1, LaneCount do
+        local seqNo = pickupSequenceStart() + laneIndex - 1
+        local execNo = SourceExecStart + laneIndex - 1
+        runCmd(string.format("Assign Sequence %d At Page %d.%d /nc",
+                             seqNo,
+                             PickupSourcePage,
+                             execNo))
+    end
+end
+
 local function createMissingPickupMidiRemotes(missingRemotes)
     local missingLookup = {}
     for _, remoteName in ipairs(missingRemotes) do
@@ -662,8 +673,8 @@ local function ensurePickupSetup()
     end
     if report.sequenceRebuildRequired then
         rebuildPickupSequences()
-    end
-    if #report.assignmentIssues > 0 then
+        repairAllPickupExecutorAssignments()
+    elseif #report.assignmentIssues > 0 then
         repairPickupExecutorAssignments(report.assignmentIssues)
     end
     if #report.staleRemotes > 0 then
