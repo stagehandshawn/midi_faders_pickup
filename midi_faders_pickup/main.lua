@@ -41,12 +41,15 @@ local loop
 --   sequenceEnd     - last pickup-sequence number reserved for this wing
 --                     (sequences count down from here). Must not overlap
 --                     the sequence range of any other wing.
+
+local WingCount = 2 -- Number of Midi Cotrollers you are using, all other wings will be ignored. Must be <= #Wings
+
 local Wings = {
     {
         name = "Wing1",
         midiChannel = 1,
         ccStart = 1,
-        sourceExecStart = 231,
+        sourceExecStart = 201,
         targetExecStart = 201,
         laneCount = 10,
         maxLaneCount = 15,
@@ -56,7 +59,7 @@ local Wings = {
         name = "Wing2",
         midiChannel = 2,
         ccStart = 1,
-        sourceExecStart = 261,
+        sourceExecStart = 216,
         targetExecStart = 216,
         laneCount = 10,
         maxLaneCount = 15,
@@ -64,12 +67,13 @@ local Wings = {
     },
 }
 
+local PickupSourcePage = 9999 -- This is the page that the midi pickup sequences will be assigned to
+
 local PollRateSeconds = 0.1 -- Polling rate in seconds for checking source and target executor values
 
 local ScriptVersion = "0.4.0"
 local PickupTolerance = 1.0
 local ExternalDirtyThreshold = 1
-local PickupSourcePage = 9999
 local PickupRemoteNamePrefix = "midi_faders_pickup_"
 local PickupGateRemoteNamePrefix = "midi_faders_gate_"
 
@@ -83,6 +87,15 @@ local function DebugPrint(...)
     if debugMode then
         Printf(...)
     end
+end
+
+local function activeWings()
+    local active = {}
+    local configuredCount = math.min(WingCount, #Wings)
+    for index = 1, configuredCount do
+        table.insert(active, Wings[index])
+    end
+    return active
 end
 
 local function sourceExecEnd(wing)
@@ -323,7 +336,17 @@ local function validateConfiguration()
         return false, "At least one wing must be configured."
     end
 
-    for _, wing in ipairs(Wings) do
+    if WingCount < 1 then
+        return false, "WingCount must be at least 1."
+    end
+
+    if WingCount > #Wings then
+        return false, string.format("WingCount %d is larger than the number of configured wings (%d).", WingCount, #Wings)
+    end
+
+    local configuredWings = activeWings()
+
+    for _, wing in ipairs(configuredWings) do
         if wing.laneCount < 1 then
             return false, string.format("%s: laneCount must be at least 1.", wing.name)
         end
@@ -348,10 +371,10 @@ local function validateConfiguration()
         end
     end
 
-    for i = 1, #Wings do
-        for j = i + 1, #Wings do
-            local a = Wings[i]
-            local b = Wings[j]
+    for i = 1, #configuredWings do
+        for j = i + 1, #configuredWings do
+            local a = configuredWings[i]
+            local b = configuredWings[j]
 
             if rangesOverlap(a.sourceExecStart, sourceExecFloor(a), b.sourceExecStart, sourceExecFloor(b)) then
                 return false, string.format(
@@ -484,7 +507,7 @@ local function getPickupSetupReport()
         wings = {},
     }
 
-    for _, wing in ipairs(Wings) do
+    for _, wing in ipairs(activeWings()) do
         local wingReport = {
             wing = wing,
             missingSequences = {},
@@ -581,7 +604,7 @@ local function pickupSetupNeedsAttention(report)
         return true
     end
 
-    for _, wing in ipairs(Wings) do
+    for _, wing in ipairs(activeWings()) do
         local wingReport = report.wings[wing.name]
         if #wingReport.missingSequences > 0 or
            #wingReport.misconfiguredSequences > 0 or
@@ -607,7 +630,7 @@ local function buildPickupSetupWarningMessage(report)
         table.insert(lines, string.format("- Page %d is missing", PickupSourcePage))
     end
 
-    for _, wing in ipairs(Wings) do
+    for _, wing in ipairs(activeWings()) do
         local wingReport = report.wings[wing.name]
 
         for _, seqNo in ipairs(wingReport.missingSequences) do
@@ -681,7 +704,7 @@ local function buildPickupSetupWarningMessage(report)
 
     table.insert(lines, "")
     local rangeSummaries = {}
-    for _, wing in ipairs(Wings) do
+    for _, wing in ipairs(activeWings()) do
         table.insert(rangeSummaries, string.format("%s: %s", wing.name, sourceExecRangeText(wing)))
     end
     table.insert(
@@ -837,7 +860,7 @@ local function remapPickupMidiRemotesForWing(wing)
 end
 
 local function remapPickupMidiRemotes()
-    for _, wing in ipairs(Wings) do
+    for _, wing in ipairs(activeWings()) do
         remapPickupMidiRemotesForWing(wing)
     end
 end
@@ -858,7 +881,7 @@ end
 
 local function showPickupSetupReminder()
     local lines = {}
-    for _, wing in ipairs(Wings) do
+    for _, wing in ipairs(activeWings()) do
         table.insert(lines, string.format("%s: source executors %s (channel %d, CC %d+)",
                                           wing.name,
                                           sourceExecRangeText(wing),
@@ -890,7 +913,7 @@ local function ensurePickupSetup()
         createPickupSourcePage()
     end
 
-    for _, wing in ipairs(Wings) do
+    for _, wing in ipairs(activeWings()) do
         local wingReport = report.wings[wing.name]
 
         if wingReport.sequenceRebuildRequired then
@@ -1052,7 +1075,7 @@ end
 
 local function initializeLanes()
     lanes = {}
-    for _, wing in ipairs(Wings) do
+    for _, wing in ipairs(activeWings()) do
         for laneIndex = 1, wing.laneCount do
             local lane = {
                 wing = wing,
@@ -1197,7 +1220,7 @@ end
 local function printStartupSummary()
     Printf("Starting -- MA3 MIDI Pickup v%s", ScriptVersion)
     Printf("Watching page %s", tostring(CurrentExecPage() and CurrentExecPage().no or "?"))
-    for _, wing in ipairs(Wings) do
+    for _, wing in ipairs(activeWings()) do
         Printf("%s: Source page %d executors %d-%d (channel %d, CC %d+) -> current page executors %d-%d",
                wing.name,
                PickupSourcePage,
