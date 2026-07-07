@@ -15,30 +15,34 @@ So you can leave the MIDI side parked on one stable page, then change pages in M
 If the setup is missing, the plugin can create:
 
 - `Page 9999`
-- sequences ending at `9999`, with the start derived from `LaneCount`
+- pickup sequence ranges for each active controller, based on that controller's `laneCount` and `sequenceEnd`
 - source executor assignments on the configured source executor range
-- MIDI remotes named `midi_faders_pickup_1` upward for however many lanes are configured
+- MIDI remotes named like `midi_faders_pickup_Wing1_1` and `midi_faders_gate_Wing1_1` upward for however many lanes are configured
 
-The remotes point at the fixed source on page `9999`. After they are created, You still need to set the MIDI CCs to match whatever controller you are using.
+The remotes point at the fixed source on page `9999`. If your CCs are not just sequential from `ccStart`, you still need to go in and change them manually to match your controller.
 
 ## How to use it
 
 1. Import or copy the full `midi_faders_pickup` plugin folder into the MA3 plugins directory.
-2. Run the plugin once.
-3. If MA3 says anything is missing or wrong, approve the repair.
-4. Set the MIDI remote CC numbers the way you want.
+2. Edit the `main.lua`
+ - You can set how many controller banks are active by editing `WingCount` default of `2`
+ - Edit the `midiChannel` for each controller
+ - You can also edit the starting CC note by editing `ccStart`
+ - You can edit the number of faders per controller up to a max of 15 by editing `laneCount`
+3. Run the plugin once.
+4. If MA3 says anything is missing or wrong, approve the repair.
+5. Set the MIDI remote CC numbers the way you want if they are not sequential
 
 ## Notes
 
-- Source side is fixed on `Page 9999`
+- Source executors are created on `Page 9999` but you can edit `PickupSourcePage` to change this location
 - Target side is the current page
-- The ranges come from the variables at the top of `main.lua`
-- `LaneCount` should stay between `1` and `15` default is `10`
-- Existing sequences are left alone if they already exist
-- The plugin will remap the existing pickup remotes back to the fixed source executors each time it starts
+- The ranges come from the values at the top of `main.lua`
+- Each active controller has its own `laneCount`, and each one should stay between `1` and `15` default is `10`
+- The plugin will ask to repair the installation if anything is missing at startup
 
 ## Contact
  - stagehandshawn@gmail.com
 
-## Donations - if Iv'e made your live a little easier
+## Donations - if I've made your life a little easier
  - Cashapp: $stagehandshawn
